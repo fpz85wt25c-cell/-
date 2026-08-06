@@ -132,7 +132,8 @@ async def finish_mode3_game(channel, game):
 
 async def send_next_quiz(channel, quiz_state):
     q = quiz_state['questions'][quiz_state['current_index']]
-    inc_text = f"'{\"', '\".join(q['includes'])}'가 포함" if q['includes'] else "포함 조건 없음"
+    joined_inc = "', '".join(q['includes'])
+    inc_text = f"'{joined_inc}'가 포함" if q['includes'] else "포함 조건 없음"
     await channel.send(
         f"❓ **퀴즈 [{quiz_state['current_index'] + 1}/{quiz_state['total']}]**\n"
         f"'**{q['first_char']}**'로 시작하고 **{inc_text}** 되어 있는 단어는?"
@@ -380,7 +381,8 @@ async def on_message(message):
 
         word = content
         if word not in words3_set:
-            await message.channel.send(f"❌ **[{word}]** 은(는) 단어장에 존재하지 않는 단어입니다.")
+            if len(word.split()) == 1:
+                await message.channel.send(f"❌ **[{word}]** 은(는) 단어장에 존재하지 않는 단어입니다.")
             return
 
         if word in mode1_game["used_words"]:
@@ -517,7 +519,8 @@ async def on_message(message):
 
         word = content
         if word not in words_set:
-            await message.channel.send(f"❌ **[{word}]** 은(는) 단어장에 존재하지 않는 단어입니다.")
+            if len(word.split()) == 1:
+                await message.channel.send(f"❌ **[{word}]** 은(는) 단어장에 존재하지 않는 단어입니다.")
             return
 
         prev_word = mode3_game["initial_word"] if len(mode3_game["history"]) == 0 else mode3_game["history"][-1]["word"]
@@ -529,11 +532,13 @@ async def on_message(message):
             await message.channel.send(f"❌ 앞 사람의 단어 (**{prev_word}**)와 겹치는 자음/모음이 있습니다: [ {', '.join(set(overlap))} ]")
             return
 
-        earned = len(word)
+        base_score = len(word)
+        bonus_score = 0
         if len(word) >= 9:
             mode3_game["combo_count"][user_id] += 1
-            earned += mode3_game["combo_count"][user_id]
+            bonus_score = mode3_game["combo_count"][user_id]
 
+        earned = base_score + bonus_score
         mode3_game["scores"][user_id] += earned
         mode3_game["turns_count"][user_id] += 1
         mode3_game["history"].append({"word": word, "player": user_id, "score": earned})
@@ -541,11 +546,13 @@ async def on_message(message):
         mode3_game["turn_idx"] = (mode3_game["turn_idx"] + 1) % len(mode3_game["players"])
 
         chain = len(mode3_game["history"])
-        history_str = mode3_game["initial_word"] + " -> " + " -> ".join([h["word"] for h in mode3_game["history"]])
+        history_str = mode3_game["initial_word"] + " ➔ " + " ➔ ".join([h["word"] for h in mode3_game["history"]])
+
+        score_detail = f"+{earned}점 (기본 {base_score}점 + 보너스 {bonus_score}점)" if bonus_score > 0 else f"+{earned}점"
 
         await message.channel.send(
-            f"기보: {history_str}\n"
-            f"🔗 **체인 수:** {chain}체인 | 👤 <@{user_id}> (+{earned}점 / 총점: {mode3_game['scores'][user_id]}점)"
+            f"```yaml\n📜 기보: {history_str}\n```\n"
+            f"🔗 **체인 수:** {chain}체인 | 👤 <@{user_id}> ({score_detail} / 총점: {mode3_game['scores'][user_id]}점)"
         )
 
         max_chain = len(mode3_game["players"]) * 50
@@ -586,10 +593,16 @@ async def on_message(message):
             if not includes and len(target) > 1:
                 includes = [target[1]]
 
+            inc_set = set(includes)
+            all_answers = []
+            for w in words2_set:
+                if w.startswith(first_char) and inc_set.issubset(set(w[1:])):
+                    all_answers.append(w)
+
             questions.append({
-                "answer": target,
+                "answers": all_answers,
                 "first_char": first_char,
-                "includes": list(set(includes))
+                "includes": list(inc_set)
             })
 
         quiz_state = {
@@ -606,7 +619,8 @@ async def on_message(message):
         current_q = quiz["questions"][quiz["current_index"]]
 
         if content == "패스":
-            await message.channel.send(f"💡 **패스!** 정답은 **[ {current_q['answer']} ]** 이었습니다.")
+            answers_str = ", ".join(current_q['answers'])
+            await message.channel.send(f"💡 **패스!** 정답 단어 목록:\n**[ {answers_str} ]**")
             quiz["current_index"] += 1
             if quiz["current_index"] >= quiz["total"]:
                 del quiz_games[channel_id]
@@ -615,8 +629,8 @@ async def on_message(message):
                 await send_next_quiz(message.channel, quiz)
             return
 
-        elif content == current_q["answer"]:
-            await message.channel.send(f"🎉 **정답입니다!** (<@{user_id}>) -> **[ {current_q['answer']} ]**")
+        elif content in current_q["answers"]:
+            await message.channel.send(f"🎉 **정답입니다!** (<@{user_id}>) -> **[ {content} ]**")
             quiz["current_index"] += 1
             if quiz["current_index"] >= quiz["total"]:
                 del quiz_games[channel_id]
@@ -650,5 +664,7 @@ async def on_message(message):
 
         await message.channel.send(f"🔍 **검색 결과 ({len(results)}개):**\n{display_list}{extra}")
         return
+
+bot.run('YOUR_DISCORD_BOT_TOKEN')
 
 bot.run('')
