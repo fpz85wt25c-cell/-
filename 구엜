@@ -4,6 +4,7 @@ import os
 import json
 import random
 import hgtk
+from collections import Counter
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -19,6 +20,7 @@ def load_words(file_name):
 words3_set = load_words("words3.txt")
 words_set = load_words("words.txt")
 words2_set = load_words("words2.txt")
+words4_set = load_words("words4.txt")
 
 STATS_FILE = "stats.json"
 user_stats = {}
@@ -104,11 +106,36 @@ def is_one_shot_word(word, word_dict):
             return False
     return True
 
+GA_HA_CHARS = ['가','나','다','라','마','바','사','아','자','차','카','타','파','하']
+
+# words4 단어장 연결 가능 단어 수 사전 계산 (정렬 속도 최적화)
+words4_start_counts = {}
+for w in words4_set:
+    if w:
+        first_c = w[0]
+        words4_start_counts[first_c] = words4_start_counts.get(first_c, 0) + 1
+
+def count_next_words_words4(word):
+    last_char = word[-1]
+    allowed_starts = get_possible_first_syllables(last_char)
+    total = 0
+    for st in allowed_starts:
+        total += words4_start_counts.get(st, 0)
+    return total
+
+def sort_words4_list(word_list):
+    def sort_key(w):
+        mission_count = sum(w.count(gh) for gh in GA_HA_CHARS)
+        next_count = count_next_words_words4(w)
+        return (-mission_count, next_count)
+    return sorted(word_list, key=sort_key)
+
 mode1_lobby = {}
 mode1_games = {}
 mode3_lobby = {}
 mode3_games = {}
 quiz_games = {}
+quiz4_games = {}
 
 def format_mode1_history(history, p1_id):
     res = []
@@ -137,6 +164,15 @@ async def send_next_quiz(channel, quiz_state):
     await channel.send(
         f"❓ **퀴즈 [{quiz_state['current_index'] + 1}/{quiz_state['total']}]**\n"
         f"'**{q['first_char']}**'로 시작하고 **{inc_text}** 되어 있는 단어는?"
+    )
+
+async def send_next_quiz4(channel, quiz_state):
+    q = quiz_state['questions'][quiz_state['current_index']]
+    cond_str = ", ".join([f"'{char}' {cnt}미" for char, cnt in q['counts'].items()])
+    inc_text = cond_str if cond_str else "포함 조건 없음"
+    await channel.send(
+        f"❓ **4퀴즈 [{quiz_state['current_index'] + 1}/{quiz_state['total']}]**\n"
+        f"'**{q['first_char']}**'로 시작하고 **{inc_text}**인 단어는?"
     )
 
 @bot.event
@@ -185,7 +221,9 @@ async def on_message(message):
             value=(
                 "`3퀴즈 [문제수]` : 지정 수만큼 퀴즈 시작 (최대 50)\n"
                 "`패스` : 퀴즈 진행 중 정답 확인 및 다음 문제\n"
-                "`3검색 [글자1] [글자2]` : 단어장 검색 (예: 3검색 기 나)"
+                "`3검색 [글자1] [글자2]` : 단어장 검색 (예: 3검색 기 나)\n"
+                "`4퀴즈 [문제수]` : 지정 수만큼 4퀴즈 시작 (최대 50)\n"
+                "`4검색 [글자1] [글자2]` : 4단어장 검색 (예: 4검색 기 나)"
             ),
             inline=False
         )
@@ -564,7 +602,7 @@ async def on_message(message):
         return
 
     if content.startswith("3퀴즈"):
-        if channel_id in quiz_games:
+        if channel_id in quiz_games or channel_id in quiz4_games:
             await message.channel.send("이미 퀴즈가 진행 중입니다.")
             return
 
@@ -575,7 +613,7 @@ async def on_message(message):
         if count <= 0: count = 1
         if count > 50: count = 50
 
-        ga_ha_chars = ['가','나','다','라','마','바','사','아','자','차','카','타','파','하']
+        ga_ha_chars = GA_HA_CHARS
         
         valid_words = []
         for w in words2_set:
@@ -666,6 +704,116 @@ async def on_message(message):
 
         display_list = ", ".join(results)
         await message.channel.send(f"🔍 **검색 결과 ({len(results)}개):**\n{display_list}")
+        return
+
+    # --- 4퀴즈 및 4검색 기능 ---
+    if content.startswith("4퀴즈"):
+        if channel_id in quiz_games or channel_id in quiz4_games:
+            await message.channel.send("이미 퀴즈가 진행 중입니다.")
+            return
+
+        parts = content.split()
+        count = 1
+        if len(parts) > 1 and parts[1].isdigit():
+            count = int(parts[1])
+        if count <= 0: count = 1
+        if count > 50: count = 50
+
+        valid_words = [w for w in words4_set if len(w) >= 2]
+        if not valid_words:
+            await message.channel.send("words4.txt 단어장이 비어있거나 조건에 맞는 단어가 없습니다.")
+            return
+
+        questions = []
+        for _ in range(count):
+            target = random.choice(valid_words)
+            first_char = target[0]
+            tail_chars = target[1:]
+
+            mission_counts = Counter(char for char in tail_chars if char in GA_HA_CHARS)
+            if not mission_counts and len(tail_chars) > 0:
+                mission_counts[tail_chars[0]] = tail_chars.count(tail_chars[0])
+
+            all_answers = []
+            for w in words4_set:
+                if w.startswith(first_char):
+                    w_tail = w[1:]
+                    match = True
+                    for char, req_cnt in mission_counts.items():
+                        if w_tail.count(char) != req_cnt:
+                            match = False
+                            break
+                    if match:
+                        all_answers.append(w)
+
+            all_answers = sort_words4_list(all_answers)
+
+            questions.append({
+                "answers": all_answers,
+                "first_char": first_char,
+                "counts": dict(mission_counts)
+            })
+
+        quiz4_state = {
+            "questions": questions,
+            "current_index": 0,
+            "total": count
+        }
+        quiz4_games[channel_id] = quiz4_state
+        await send_next_quiz4(message.channel, quiz4_state)
+        return
+
+    quiz4 = quiz4_games.get(channel_id)
+    if quiz4:
+        current_q = quiz4["questions"][quiz4["current_index"]]
+
+        if content == "패스":
+            answers_str = ", ".join(current_q['answers'])
+            await message.channel.send(f"💡 **패스!** 정답 단어 목록:\n**[ {answers_str} ]**")
+            quiz4["current_index"] += 1
+            if quiz4["current_index"] >= quiz4["total"]:
+                del quiz4_games[channel_id]
+                await message.channel.send("🎉 모든 퀴즈 문제가 완료되었습니다!")
+            else:
+                await send_next_quiz4(message.channel, quiz4)
+            return
+
+        elif content in current_q["answers"]:
+            answers_str = ", ".join(current_q['answers'])
+            await message.channel.send(
+                f"🎉 **정답입니다!** (<@{user_id}>) -> **[ {content} ]**\n"
+                f"📝 **이 문제의 모든 정답 ({len(current_q['answers'])}개):**\n[ {answers_str} ]"
+            )
+            quiz4["current_index"] += 1
+            if quiz4["current_index"] >= quiz4["total"]:
+                del quiz4_games[channel_id]
+                await message.channel.send("🎉 모든 퀴즈 문제가 완료되었습니다!")
+            else:
+                await send_next_quiz4(message.channel, quiz4)
+            return
+
+    if content.startswith("4검색"):
+        parts = content.split()
+        if len(parts) < 2:
+            await message.channel.send("사용법: `4검색 [첫글자]` 또는 `4검색 [첫글자] [포함글자]`")
+            return
+
+        start_char = parts[1]
+        include_char = parts[2] if len(parts) > 2 else None
+
+        results = []
+        for word in words4_set:
+            if word.startswith(start_char):
+                if include_char is None or include_char in word:
+                    results.append(word)
+
+        if not results:
+            await message.channel.send("🔍 검색 결과가 없습니다.")
+            return
+
+        sorted_results = sort_words4_list(results)
+        display_list = ", ".join(sorted_results)
+        await message.channel.send(f"🔍 **검색 결과 ({len(sorted_results)}개):**\n{display_list}")
         return
 
 bot.run('')
