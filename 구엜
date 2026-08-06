@@ -632,7 +632,11 @@ async def on_message(message):
             return
 
         elif content in current_q["answers"]:
-            await message.channel.send(f"🎉 **정답입니다!** (<@{user_id}>) -> **[ {content} ]**")
+            answers_str = ", ".join(current_q['answers'])
+            await message.channel.send(
+                f"🎉 **정답입니다!** (<@{user_id}>) -> **[ {content} ]**\n"
+                f"📝 **이 문제의 모든 정답 ({len(current_q['answers'])}개):**\n[ {answers_str} ]"
+            )
             quiz["current_index"] += 1
             if quiz["current_index"] >= quiz["total"]:
                 del quiz_games[channel_id]
@@ -660,11 +664,8 @@ async def on_message(message):
             await message.channel.send("🔍 검색 결과가 없습니다.")
             return
 
-        max_display = 20
-        display_list = ", ".join(results[:max_display])
-        extra = f" 외 {len(results) - max_display}개" if len(results) > max_display else ""
-
-        await message.channel.send(f"🔍 **검색 결과 ({len(results)}개):**\n{display_list}{extra}")
+        display_list = ", ".join(results)
+        await message.channel.send(f"🔍 **검색 결과 ({len(results)}개):**\n{display_list}")
         return
 
 bot.run('')
