@@ -108,26 +108,27 @@ def is_one_shot_word(word, word_dict):
 
 GA_HA_CHARS = ['가','나','다','라','마','바','사','아','자','차','카','타','파','하']
 
-# words4 단어장 연결 가능 단어 수 사전 계산 (정렬 속도 최적화)
-words4_start_counts = {}
-for w in words4_set:
-    if w:
-        first_c = w[0]
-        words4_start_counts[first_c] = words4_start_counts.get(first_c, 0) + 1
-
-def count_next_words_words4(word):
+def count_next_words_words4(word, start_counts):
     last_char = word[-1]
     allowed_starts = get_possible_first_syllables(last_char)
     total = 0
     for st in allowed_starts:
-        total += words4_start_counts.get(st, 0)
+        total += start_counts.get(st, 0)
     return total
 
 def sort_words4_list(word_list):
+    # 메모리 절약을 위해 정렬 함수 호출 시에만 첫글자 빈도 집계
+    start_counts = {}
+    for w in words4_set:
+        if w:
+            st = w[0]
+            start_counts[st] = start_counts.get(st, 0) + 1
+
     def sort_key(w):
         mission_count = sum(w.count(gh) for gh in GA_HA_CHARS)
-        next_count = count_next_words_words4(w)
+        next_count = count_next_words_words4(w, start_counts)
         return (-mission_count, next_count)
+        
     return sorted(word_list, key=sort_key)
 
 mode1_lobby = {}
