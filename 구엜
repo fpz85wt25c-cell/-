@@ -1,0 +1,654 @@
+import discord
+from discord.ext import commands
+import os
+import json
+import random
+import hgtk
+
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="", intents=intents)
+
+def load_words(file_name):
+    if not os.path.exists(file_name):
+        print(f"[경고] {file_name} 파일이 존재하지 않습니다.")
+        return set()
+    with open(file_name, "r", encoding="utf-8") as f:
+        return set(line.strip() for line in f if line.strip())
+
+words3_set = load_words("words3.txt")
+words_set = load_words("words.txt")
+words2_set = load_words("words2.txt")
+
+STATS_FILE = "stats.json"
+user_stats = {}
+if os.path.exists(STATS_FILE):
+    try:
+        with open(STATS_FILE, "r", encoding="utf-8") as f:
+            user_stats = json.load(f)
+    except Exception:
+        user_stats = {}
+
+def save_stats():
+    with open(STATS_FILE, "w", encoding="utf-8") as f:
+        json.dump(user_stats, f, ensure_ascii=False, indent=2)
+
+def record_game_result(winner_id, loser_id):
+    w_id, l_id = str(winner_id), str(loser_id)
+    if w_id not in user_stats:
+        user_stats[w_id] = {"win": 0, "lose": 0}
+    if l_id not in user_stats:
+        user_stats[l_id] = {"win": 0, "lose": 0}
+    
+    user_stats[w_id]["win"] += 1
+    user_stats[l_id]["lose"] += 1
+    save_stats()
+
+CHO_LIST = ['ㄱ','ㄲ','ㄴ','ㄷ','ㄸ','ㄹ','ㅁ','ㅂ','ㅃ','ㅅ','ㅆ','ㅇ','ㅈ','ㅉ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ']
+DOUBLE_JONG_MAP = {
+    'ㄳ': ['ㄱ', 'ㅅ'], 'ㄵ': ['ㄴ', 'ㅈ'], 'ㄶ': ['ㄴ', 'ㅎ'],
+    'ㄺ': ['ㄹ', 'ㄱ'], 'ㄻ': ['ㄹ', 'ㅁ'], 'ㄼ': ['ㄹ', 'ㅂ'],
+    'ㄽ': ['ㄹ', 'ㅅ'], 'ㄾ': ['ㄹ', 'ㅌ'], 'ㄿ': ['ㄹ', 'ㅍ'],
+    'ㅀ': ['ㄹ', 'ㅎ'], 'ㅄ': ['ㅂ', 'ㅅ']
+}
+
+def extract_jamo_set(word):
+    jamo_set = set()
+    for char in word:
+        if hgtk.checker.is_hangul(char):
+            cho, jo, jong = hgtk.letter.decompose(char)
+            jamo_set.add(cho)
+            jamo_set.add(jo)
+            if jong:
+                if jong in DOUBLE_JONG_MAP:
+                    jamo_set.update(DOUBLE_JONG_MAP[jong])
+                else:
+                    jamo_set.add(jong)
+        else:
+            jamo_set.add(char)
+    return jamo_set
+
+def get_possible_first_syllables(syllable):
+    if not hgtk.checker.is_hangul(syllable):
+        return [syllable]
+    
+    if syllable.startswith("러"):
+        return ["러"]
+
+    cho, jo, jong = hgtk.letter.decompose(syllable)
+    possible = [syllable]
+
+    if cho == 'ㄹ' and jo in ['ㅏ', 'ㅐ', 'ㅗ', 'ㅚ', 'ㅜ', 'ㅡ']:
+        possible.append(hgtk.letter.compose('ㄴ', jo, jong))
+
+    if cho == 'ㄹ' and jo in ['ㅑ', 'ㅕ', 'ㅖ', 'ㅛ', 'ㅠ', 'ㅣ']:
+        possible.append(hgtk.letter.compose('ㅇ', jo, jong))
+
+    if cho == 'ㄴ' and jo in ['ㅕ', 'ㅛ', 'ㅠ', 'ㅣ']:
+        possible.append(hgtk.letter.compose('ㅇ', jo, jong))
+
+    return list(set(possible))
+
+def can_connect_word(prev_word, next_word):
+    if not prev_word:
+        return True
+    last_char = prev_word[-1]
+    allowed_starts = get_possible_first_syllables(last_char)
+    return next_word[0] in allowed_starts
+
+def is_one_shot_word(word, word_dict):
+    last_char = word[-1]
+    allowed_starts = get_possible_first_syllables(last_char)
+    for w in word_dict:
+        if w[0] in allowed_starts:
+            return False
+    return True
+
+mode1_lobby = {}
+mode1_games = {}
+mode3_lobby = {}
+mode3_games = {}
+quiz_games = {}
+
+def format_mode1_history(history, p1_id):
+    res = []
+    for item in history:
+        w = item['word']
+        if item['player'] == p1_id:
+            res.append(f"({w})")
+        else:
+            res.append(f"[{w}]")
+    return " -> ".join(res)
+
+async def finish_mode3_game(channel, game):
+    sorted_scores = sorted(game['scores'].items(), key=lambda x: x[1], reverse=True)
+    res = "🏆 **자음·모음 비중복 게임 결과 발표**\n"
+    for idx, (p_id, sc) in enumerate(sorted_scores):
+        res += f"{idx + 1}위: <@{p_id}> - {sc}점\n"
+    
+    if channel.id in mode3_games:
+        del mode3_games[channel.id]
+    await channel.send(res)
+
+async def send_next_quiz(channel, quiz_state):
+    q = quiz_state['questions'][quiz_state['current_index']]
+    inc_text = f"'{\"', '\".join(q['includes'])}'가 포함" if q['includes'] else "포함 조건 없음"
+    await channel.send(
+        f"❓ **퀴즈 [{quiz_state['current_index'] + 1}/{quiz_state['total']}]**\n"
+        f"'**{q['first_char']}**'로 시작하고 **{inc_text}** 되어 있는 단어는?"
+    )
+
+@bot.event
+async def on_ready():
+    print(f"로그인 성공: {bot.user.name}")
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    content = message.content.strip()
+    channel_id = message.channel.id
+    user_id = message.author.id
+
+    if content == "1명령어":
+        embed = discord.Embed(title="📖 디스코드 게임 봇 명령어 안내", color=0x00AE89)
+        embed.add_field(
+            name="🔤 모드 1: 끝말잇기",
+            value=(
+                "`1시작` : 일반 대전 대기방 생성\n"
+                "`1랭겜` : 랭크 대전 대기방 생성\n"
+                "`1테스트` : 혼자 하기 (연습 모드)\n"
+                "`1취소` : 대기 중인 게임 신청 취소\n"
+                "`1기권` : 게임 진행 중 항복\n"
+                "`1무르기 [단어]` : 내가 입력했던 단어 무르기 (일반/테스트 전용)\n"
+                "`1뺏기` : 후공 첫 턴에 선공 단어 뺏기\n"
+                "`1전적` : 본인 랭크 전적 조회\n"
+                "`1랭킹` : 전체 랭크 순위표 조회"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="🧩 모드 2: 자음·모음 비중복 게임",
+            value=(
+                "`3참가` : 게임 참가/대기방 생성\n"
+                "`3시작` : 게임 개시 (방장 전용)\n"
+                "`3테스트` : 혼자 하기 (연습 모드)\n"
+                "`3종료` : (조건 충족 시) 게임 종료 및 결과 산출\n"
+                "`3기권` : 게임 중도 포기 및 취소"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="🔍 모드 3: 퀴즈 & 단어 검색",
+            value=(
+                "`3퀴즈 [문제수]` : 지정 수만큼 퀴즈 시작 (최대 50)\n"
+                "`패스` : 퀴즈 진행 중 정답 확인 및 다음 문제\n"
+                "`3검색 [글자1] [글자2]` : 단어장 검색 (예: 3검색 기 나)"
+            ),
+            inline=False
+        )
+        await message.channel.send(embed=embed)
+        return
+
+    if content == "1전적":
+        u_id_str = str(user_id)
+        stat = user_stats.get(u_id_str, {"win": 0, "lose": 0})
+        total = stat["win"] + stat["lose"]
+        rate = 0 if total == 0 else round((stat["win"] / total) * 100, 1)
+        await message.channel.send(
+            f"📊 **<@{user_id}> 님의 랭크 전적**\n승리: {stat['win']}승 | 패배: {stat['lose']}패 | 승률: {rate}%"
+        )
+        return
+
+    if content == "1랭킹":
+        if not user_stats:
+            await message.channel.send("등록된 랭크 전적이 없습니다.")
+            return
+
+        sorted_users = sorted(
+            user_stats.items(),
+            key=lambda x: (
+                x[1]["win"] / (x[1]["win"] + x[1]["lose"]) if (x[1]["win"] + x[1]["lose"]) > 0 else 0,
+                x[1]["win"]
+            ),
+            reverse=True
+        )
+
+        rank_text = "🏆 **전체 랭크 순위표**\n"
+        for idx, (u_id, st) in enumerate(sorted_users[:10]):
+            tot = st["win"] + st["lose"]
+            r = 0 if tot == 0 else round((st["win"] / tot) * 100, 1)
+            rank_text += f"{idx + 1}. <@{u_id}> - {st['win']}승 {st['lose']}패 ({r}%)\n"
+        await message.channel.send(rank_text)
+        return
+
+    if content in ["1시작", "1랭겜", "1테스트"]:
+        if channel_id in mode1_games:
+            await message.channel.send("이미 게임이 진행 중입니다.")
+            return
+
+        if content == "1테스트":
+            game = {
+                "is_rank": False,
+                "is_test": True,
+                "p1": user_id,
+                "p2": user_id,
+                "turn": user_id,
+                "history": [],
+                "used_words": set()
+            }
+            mode1_games[channel_id] = game
+            await message.channel.send("🎮 **끝말잇기 (연습 모드)**가 시작되었습니다!\n첫 번째 단어를 입력하세요. (소괄호: 선공 / 대괄호: 후공)")
+            return
+
+        is_rank = (content == "1랭겜")
+        lobby = mode1_lobby.get(channel_id)
+
+        if not lobby:
+            mode1_lobby[channel_id] = {"host": user_id, "is_rank": is_rank}
+            mode_name = "랭크" if is_rank else "일반"
+            await message.channel.send(f"🎮 **끝말잇기 ({mode_name})** 대전 방이 생성되었습니다.\n상대방은 `{content}`을 입력하여 참가하세요.")
+        else:
+            if lobby["host"] == user_id:
+                await message.channel.send("본인이 만든 방에 대전 상대로 참가할 수 없습니다.")
+                return
+            if lobby["is_rank"] != is_rank:
+                expected = '1랭겜' if lobby['is_rank'] else '1시작'
+                await message.channel.send(f"현재 생성된 방은 `{expected}` 방입니다.")
+                return
+
+            game = {
+                "is_rank": is_rank,
+                "is_test": False,
+                "p1": lobby["host"],
+                "p2": user_id,
+                "turn": lobby["host"],
+                "history": [],
+                "used_words": set()
+            }
+            del mode1_lobby[channel_id]
+            mode1_games[channel_id] = game
+
+            mode_title = "랭크 매치" if is_rank else "친선 매치"
+            await message.channel.send(
+                f"⚔️ **게임 시작!** ({mode_title})\n"
+                f"선공: <@{game['p1']}> (소괄호)\n후공: <@{game['p2']}> [대괄호]\n"
+                f"<@{game['p1']}> 님부터 첫 단어를 입력하세요."
+            )
+        return
+
+    if content == "1취소":
+        lobby = mode1_lobby.get(channel_id)
+        if not lobby:
+            await message.channel.send("취소할 대기 중인 방이 없습니다.")
+            return
+        if lobby["host"] != user_id:
+            await message.channel.send("방장만 취소할 수 있습니다.")
+            return
+        del mode1_lobby[channel_id]
+        await message.channel.send("대전 대기방이 취소되었습니다.")
+        return
+
+    if content == "1기권":
+        game = mode1_games.get(channel_id)
+        if not game:
+            await message.channel.send("현재 진행 중인 끝말잇기 게임이 없습니다.")
+            return
+        if user_id not in [game["p1"], game["p2"]]:
+            await message.channel.send("게임 참여자만 기권할 수 있습니다.")
+            return
+
+        winner = game["p2"] if user_id == game["p1"] else game["p1"]
+        msg = f"🏳️ <@{user_id}> 님이 기권하셨습니다. <@{winner}> 님의 승리!"
+
+        if game["is_rank"] and not game["is_test"]:
+            record_game_result(winner, user_id)
+            msg += "\n📊 랭크 전적이 반영되었습니다."
+
+        del mode1_games[channel_id]
+        await message.channel.send(msg)
+        return
+
+    if content.startswith("1무르기"):
+        game = mode1_games.get(channel_id)
+        if not game:
+            await message.channel.send("현재 진행 중인 게임이 없습니다.")
+            return
+        if game["is_rank"]:
+            await message.channel.send("⚠️ 랭크 게임에서는 무르기를 사용할 수 없습니다.")
+            return
+
+        target_word = content.replace("1무르기", "").strip()
+        if not target_word:
+            await message.channel.send("무르고 싶은 단어를 입력해주세요. (예: `1무르기 과자`)")
+            return
+
+        last_idx = -1
+        for i in range(len(game["history"]) - 1, -1, -1):
+            item = game["history"][i]
+            if item["word"] == target_word and item["player"] == user_id:
+                last_idx = i
+                break
+
+        if last_idx == -1:
+            await message.channel.send("무를 수 있는 단어가 존재하지 않거나 본인이 친 단어가 아닙니다.")
+            return
+
+        removed = game["history"][last_idx:]
+        game["history"] = game["history"][:last_idx]
+        for item in removed:
+            game["used_words"].discard(item["word"])
+
+        if game["history"]:
+            last_item = game["history"][-1]
+            game["turn"] = game["p2"] if last_item["player"] == game["p1"] else game["p1"]
+        else:
+            game["turn"] = game["p1"]
+
+        rec_str = format_mode1_history(game["history"], game["p1"])
+        await message.channel.send(f"🔄 **무르기 성공!** [{target_word}] 이후의 단어가 제거되었습니다.\n현재 기보: {rec_str or '없음'}")
+        return
+
+    if content == "1뺏기":
+        game = mode1_games.get(channel_id)
+        if not game:
+            await message.channel.send("진행 중인 게임이 없습니다.")
+            return
+        if len(game["history"]) != 1:
+            await message.channel.send("⚠️ 뺏기는 후공의 첫 턴(전체 기보의 2번째 턴)에서만 사용 가능합니다.")
+            return
+        if not game["is_test"] and user_id != game["p2"]:
+            await message.channel.send("후공 플레이어만 뺏기를 사용할 수 있습니다.")
+            return
+
+        stolen = game["history"].pop()
+        game["used_words"].discard(stolen["word"])
+
+        game["history"].append({"word": stolen["word"], "player": game["p2"]})
+        game["used_words"].add(stolen["word"])
+        game["turn"] = game["p1"]
+
+        rec_str = format_mode1_history(game["history"], game["p1"])
+        await message.channel.send(f"⚡ **1뺏기 성공!** 후공이 선공의 단어 `{stolen['word']}`을(를) 빼앗았습니다!\n기보: {rec_str}")
+        return
+
+    mode1_game = mode1_games.get(channel_id)
+    if mode1_game and not content.startswith("1"):
+        if not mode1_game["is_test"] and user_id != mode1_game["turn"]:
+            return
+
+        word = content
+        if word not in words3_set:
+            await message.channel.send(f"❌ **[{word}]** 은(는) 단어장에 존재하지 않는 단어입니다.")
+            return
+
+        if word in mode1_game["used_words"]:
+            await message.channel.send(f"❌ 이미 사용된 단어입니다: **[{word}]**")
+            return
+
+        if len(mode1_game["history"]) == 0:
+            if is_one_shot_word(word, words3_set):
+                await message.channel.send("❌ 첫 번째 턴에는 이을 수 없는 **한방단어**를 사용할 수 없습니다!")
+                return
+        else:
+            prev_word = mode1_game["history"][-1]["word"]
+            if not can_connect_word(prev_word, word):
+                await message.channel.send(f"❌ 두음법칙 포함 끝말잇기 규칙에 맞지 않습니다! (이전 단어: **{prev_word}**)")
+                return
+
+        mode1_game["history"].append({"word": word, "player": user_id})
+        mode1_game["used_words"].add(word)
+
+        if not mode1_game["is_test"]:
+            mode1_game["turn"] = mode1_game["p2"] if mode1_game["turn"] == mode1_game["p1"] else mode1_game["p1"]
+
+        rec_str = format_mode1_history(mode1_game["history"], mode1_game["p1"])
+        await message.channel.send(f"기보: {rec_str}")
+        return
+
+    if content in ["3참가", "3테스트"]:
+        if channel_id in mode3_games:
+            await message.channel.send("이미 게임이 진행 중입니다.")
+            return
+
+        if content == "3테스트":
+            if not words_set:
+                await message.channel.send("words.txt 단어장이 비어있습니다.")
+                return
+            initial_word = random.choice(list(words_set))
+            game = {
+                "is_test": True,
+                "host": user_id,
+                "players": [user_id],
+                "turn_idx": 0,
+                "history": [],
+                "scores": {user_id: 0},
+                "turns_count": {user_id: 0},
+                "combo_count": {user_id: 0},
+                "initial_word": initial_word
+            }
+            mode3_games[channel_id] = game
+            await message.channel.send(f"🧩 **자음·모음 비중복 게임 (연습 모드)**가 시작되었습니다!\n제시어: **[ {initial_word} ]**")
+            return
+
+        lobby = mode3_lobby.get(channel_id)
+        if not lobby:
+            mode3_lobby[channel_id] = {"host": user_id, "players": [user_id]}
+            await message.channel.send(f"🧩 **자음·모음 비중복 게임** 대기방이 열렸습니다.\n참가할 유저는 `3참가`를 입력하세요. (방장: <@{user_id}>)")
+        else:
+            if user_id in lobby["players"]:
+                await message.channel.send("이미 참가 등록되셨습니다.")
+                return
+            lobby["players"].append(user_id)
+            await message.channel.send(f"✅ <@{user_id}> 님이 참가하셨습니다. (현재 인원: {len(lobby['players'])}명)")
+        return
+
+    if content == "3시작":
+        lobby = mode3_lobby.get(channel_id)
+        if not lobby:
+            await message.channel.send("대기 중인 방이 없습니다.")
+            return
+        if lobby["host"] != user_id:
+            await message.channel.send("방장만 시작할 수 있습니다.")
+            return
+        if not words_set:
+            await message.channel.send("words.txt 단어장이 비어있습니다.")
+            return
+
+        initial_word = random.choice(list(words_set))
+        game = {
+            "is_test": False,
+            "host": lobby["host"],
+            "players": lobby["players"],
+            "turn_idx": 0,
+            "history": [],
+            "scores": {p: 0 for p in lobby["players"]},
+            "turns_count": {p: 0 for p in lobby["players"]},
+            "combo_count": {p: 0 for p in lobby["players"]},
+            "initial_word": initial_word
+        }
+
+        del mode3_lobby[channel_id]
+        mode3_games[channel_id] = game
+
+        await message.channel.send(
+            f"🧩 **게임 개시!**\n"
+            f"제시어: **[ {initial_word} ]**\n"
+            f"첫번째 순서: <@{game['players'][0]}> 님부터 단어를 입력해주세요!"
+        )
+        return
+
+    if content == "3기권":
+        game = mode3_games.get(channel_id)
+        if not game:
+            await message.channel.send("진행 중인 자음·모음 게임이 없습니다.")
+            return
+        if user_id not in game["players"]:
+            await message.channel.send("게임 참가자가 아닙니다.")
+            return
+
+        del mode3_games[channel_id]
+        await message.channel.send(f"🏳️ <@{user_id}> 님의 기권으로 게임이 중단되었습니다.")
+        return
+
+    if content == "3종료":
+        game = mode3_games.get(channel_id)
+        if not game:
+            await message.channel.send("진행 중인 게임이 없습니다.")
+            return
+        if user_id not in game["players"]:
+            await message.channel.send("게임 참가자만 입력할 수 있습니다.")
+            return
+
+        min_chain = len(game["players"]) * 5
+        if len(game["history"]) < min_chain:
+            await message.channel.send(f"❌ 최소 {min_chain}체인(인원당 5턴 이상)에 도달해야 게임을 종료할 수 있습니다. (현재 체인: {len(game['history'])})")
+            return
+
+        await finish_mode3_game(message.channel, game)
+        return
+
+    mode3_game = mode3_games.get(channel_id)
+    if mode3_game and not content.startswith("3"):
+        current_player = mode3_game["players"][mode3_game["turn_idx"]]
+        if not mode3_game["is_test"] and user_id != current_player:
+            return
+
+        word = content
+        if word not in words_set:
+            await message.channel.send(f"❌ **[{word}]** 은(는) 단어장에 존재하지 않는 단어입니다.")
+            return
+
+        prev_word = mode3_game["initial_word"] if len(mode3_game["history"]) == 0 else mode3_game["history"][-1]["word"]
+        prev_jamos = extract_jamo_set(prev_word)
+        current_jamos = extract_jamo_set(word)
+
+        overlap = list(current_jamos.intersection(prev_jamos))
+        if overlap:
+            await message.channel.send(f"❌ 앞 사람의 단어 (**{prev_word}**)와 겹치는 자음/모음이 있습니다: [ {', '.join(set(overlap))} ]")
+            return
+
+        earned = len(word)
+        if len(word) >= 9:
+            mode3_game["combo_count"][user_id] += 1
+            earned += mode3_game["combo_count"][user_id]
+
+        mode3_game["scores"][user_id] += earned
+        mode3_game["turns_count"][user_id] += 1
+        mode3_game["history"].append({"word": word, "player": user_id, "score": earned})
+
+        mode3_game["turn_idx"] = (mode3_game["turn_idx"] + 1) % len(mode3_game["players"])
+
+        chain = len(mode3_game["history"])
+        history_str = mode3_game["initial_word"] + " -> " + " -> ".join([h["word"] for h in mode3_game["history"]])
+
+        await message.channel.send(
+            f"기보: {history_str}\n"
+            f"🔗 **체인 수:** {chain}체인 | 👤 <@{user_id}> (+{earned}점 / 총점: {mode3_game['scores'][user_id]}점)"
+        )
+
+        max_chain = len(mode3_game["players"]) * 50
+        if chain >= max_chain:
+            await message.channel.send(f"🎉 최대 체인 수({max_chain}체인)에 도달하여 게임이 자동 종료됩니다!")
+            await finish_mode3_game(message.channel, mode3_game)
+        return
+
+    if content.startswith("3퀴즈"):
+        if channel_id in quiz_games:
+            await message.channel.send("이미 퀴즈가 진행 중입니다.")
+            return
+
+        parts = content.split()
+        count = 1
+        if len(parts) > 1 and parts[1].isdigit():
+            count = int(parts[1])
+        if count <= 0: count = 1
+        if count > 50: count = 50
+
+        ga_ha_chars = ['가','나','다','라','마','바','사','아','자','차','카','타','파','하']
+        
+        valid_words = []
+        for w in words2_set:
+            if any(gh in w for gh in ga_ha_chars):
+                valid_words.append(w)
+
+        if not valid_words:
+            await message.channel.send("퀴즈 조건에 맞는 단어가 words2.txt에 없습니다.")
+            return
+
+        questions = []
+        for _ in range(count):
+            target = random.choice(valid_words)
+            first_char = target[0]
+            includes = [char for char in target[1:] if char in ga_ha_chars]
+            
+            if not includes and len(target) > 1:
+                includes = [target[1]]
+
+            questions.append({
+                "answer": target,
+                "first_char": first_char,
+                "includes": list(set(includes))
+            })
+
+        quiz_state = {
+            "questions": questions,
+            "current_index": 0,
+            "total": count
+        }
+        quiz_games[channel_id] = quiz_state
+        await send_next_quiz(message.channel, quiz_state)
+        return
+
+    quiz = quiz_games.get(channel_id)
+    if quiz:
+        current_q = quiz["questions"][quiz["current_index"]]
+
+        if content == "패스":
+            await message.channel.send(f"💡 **패스!** 정답은 **[ {current_q['answer']} ]** 이었습니다.")
+            quiz["current_index"] += 1
+            if quiz["current_index"] >= quiz["total"]:
+                del quiz_games[channel_id]
+                await message.channel.send("🎉 모든 퀴즈 문제가 완료되었습니다!")
+            else:
+                await send_next_quiz(message.channel, quiz)
+            return
+
+        elif content == current_q["answer"]:
+            await message.channel.send(f"🎉 **정답입니다!** (<@{user_id}>) -> **[ {current_q['answer']} ]**")
+            quiz["current_index"] += 1
+            if quiz["current_index"] >= quiz["total"]:
+                del quiz_games[channel_id]
+                await message.channel.send("🎉 모든 퀴즈 문제가 완료되었습니다!")
+            else:
+                await send_next_quiz(message.channel, quiz)
+            return
+
+    if content.startswith("3검색"):
+        parts = content.split()
+        if len(parts) < 2:
+            await message.channel.send("사용법: `3검색 [첫글자]` 또는 `3검색 [첫글자] [포함글자]`")
+            return
+
+        start_char = parts[1]
+        include_char = parts[2] if len(parts) > 2 else None
+
+        results = []
+        for word in words2_set:
+            if word.startswith(start_char):
+                if include_char is None or include_char in word:
+                    results.append(word)
+
+        if not results:
+            await message.channel.send("🔍 검색 결과가 없습니다.")
+            return
+
+        max_display = 20
+        display_list = ", ".join(results[:max_display])
+        extra = f" 외 {len(results) - max_display}개" if len(results) > max_display else ""
+
+        await message.channel.send(f"🔍 **검색 결과 ({len(results)}개):**\n{display_list}{extra}")
+        return
+
+bot.run('')
