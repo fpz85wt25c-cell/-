@@ -544,6 +544,7 @@ async def on_message(message):
         mode3_game["history"].append({"word": word, "player": user_id, "score": earned})
 
         mode3_game["turn_idx"] = (mode3_game["turn_idx"] + 1) % len(mode3_game["players"])
+        next_player = mode3_game["players"][mode3_game["turn_idx"]]
 
         chain = len(mode3_game["history"])
         history_str = mode3_game["initial_word"] + " ➔ " + " ➔ ".join([h["word"] for h in mode3_game["history"]])
@@ -552,7 +553,8 @@ async def on_message(message):
 
         await message.channel.send(
             f"```yaml\n📜 기보: {history_str}\n```\n"
-            f"🔗 **체인 수:** {chain}체인 | 👤 <@{user_id}> ({score_detail} / 총점: {mode3_game['scores'][user_id]}점)"
+            f"🔗 **체인 수:** {chain}체인 | 👤 <@{user_id}> ({score_detail} / 총점: {mode3_game['scores'][user_id]}점)\n"
+            f"👉 **다음 차례:** <@{next_player}>"
         )
 
         max_chain = len(mode3_game["players"]) * 50
@@ -664,7 +666,5 @@ async def on_message(message):
 
         await message.channel.send(f"🔍 **검색 결과 ({len(results)}개):**\n{display_list}{extra}")
         return
-
-bot.run('YOUR_DISCORD_BOT_TOKEN')
 
 bot.run('')
