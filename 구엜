@@ -716,7 +716,7 @@ async def on_message(message):
         words4_set = get_word_set("words4.txt")
         # 첫 음절이 GA_HA_CHARS에 포함되고, 2번째 음절 이후에도 GA_HA_CHARS에 해당하는 글자가 최소 1개 이상 존재하는 단어만 출제 후보로 선택
         valid_words = [
-            w for w in words4_set 
+            w for w in words4_set
             if len(w) >= 2 and w[0] in GA_HA_CHARS and any(char in GA_HA_CHARS for char in w[1:])
         ]
         if not valid_words:
