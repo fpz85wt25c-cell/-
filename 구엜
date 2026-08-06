@@ -714,9 +714,13 @@ async def on_message(message):
         if count > 50: count = 50
 
         words4_set = get_word_set("words4.txt")
-        valid_words = [w for w in words4_set if len(w) >= 2]
+        # 첫 음절이 GA_HA_CHARS에 포함되고, 2번째 음절 이후에도 GA_HA_CHARS에 해당하는 글자가 최소 1개 이상 존재하는 단어만 출제 후보로 선택
+        valid_words = [
+            w for w in words4_set 
+            if len(w) >= 2 and w[0] in GA_HA_CHARS and any(char in GA_HA_CHARS for char in w[1:])
+        ]
         if not valid_words:
-            await message.channel.send("words4.txt 단어장이 비어있거나 조건에 맞는 단어가 없습니다.")
+            await message.channel.send("words4.txt 단어장에 '가~하' 음절 조건을 만족하는 단어가 없습니다.")
             return
 
         questions = []
@@ -725,9 +729,8 @@ async def on_message(message):
             first_char = target[0]
             tail_chars = target[1:]
 
+            # 오직 '가~하' (GA_HA_CHARS)에 포함되는 음절만 카운트
             mission_counts = Counter(char for char in tail_chars if char in GA_HA_CHARS)
-            if not mission_counts and len(tail_chars) > 0:
-                mission_counts[tail_chars[0]] = tail_chars.count(tail_chars[0])
 
             all_answers = []
             for w in words4_set:
