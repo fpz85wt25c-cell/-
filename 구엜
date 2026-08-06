@@ -10,17 +10,26 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="", intents=intents)
 
-def load_words(file_name):
+# 메모리 절약을 위해 필요할 때만 불러오는 지연 로딩 (Lazy Loading) 함수
+def load_words_lazy(file_name):
     if not os.path.exists(file_name):
         print(f"[경고] {file_name} 파일이 존재하지 않습니다.")
         return set()
+    words = set()
     with open(file_name, "r", encoding="utf-8") as f:
-        return set(line.strip() for line in f if line.strip())
+        for line in f:
+            w = line.strip()
+            if w:
+                words.add(w)
+    return words
 
-words3_set = load_words("words3.txt")
-words_set = load_words("words.txt")
-words2_set = load_words("words2.txt")
-words4_set = load_words("words4.txt")
+# 기본 시작 시에는 꼭 필요한 단어장만 로드하거나 필요 시 로드하도록 캐시 구조 적용
+WORD_CACHE = {}
+
+def get_word_set(file_name):
+    if file_name not in WORD_CACHE:
+        WORD_CACHE[file_name] = load_words_lazy(file_name)
+    return WORD_CACHE[file_name]
 
 STATS_FILE = "stats.json"
 user_stats = {}
@@ -46,7 +55,6 @@ def record_game_result(winner_id, loser_id):
     user_stats[l_id]["lose"] += 1
     save_stats()
 
-CHO_LIST = ['ㄱ','ㄲ','ㄴ','ㄷ','ㄸ','ㄹ','ㅁ','ㅂ','ㅃ','ㅅ','ㅆ','ㅇ','ㅈ','ㅉ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ']
 DOUBLE_JONG_MAP = {
     'ㄳ': ['ㄱ', 'ㅅ'], 'ㄵ': ['ㄴ', 'ㅈ'], 'ㄶ': ['ㄴ', 'ㅎ'],
     'ㄺ': ['ㄹ', 'ㄱ'], 'ㄻ': ['ㄹ', 'ㅁ'], 'ㄼ': ['ㄹ', 'ㅂ'],
@@ -108,25 +116,16 @@ def is_one_shot_word(word, word_dict):
 
 GA_HA_CHARS = ['가','나','다','라','마','바','사','아','자','차','카','타','파','하']
 
-def count_next_words_words4(word, start_counts):
+def count_next_words_words4(word, words4_set):
     last_char = word[-1]
     allowed_starts = get_possible_first_syllables(last_char)
-    total = 0
-    for st in allowed_starts:
-        total += start_counts.get(st, 0)
-    return total
+    # 메모리 절약을 위해 필요할 때만 조건 검사
+    return sum(1 for w in words4_set if w and w[0] in allowed_starts)
 
-def sort_words4_list(word_list):
-    # 메모리 절약을 위해 정렬 함수 호출 시에만 첫글자 빈도 집계
-    start_counts = {}
-    for w in words4_set:
-        if w:
-            st = w[0]
-            start_counts[st] = start_counts.get(st, 0) + 1
-
+def sort_words4_list(word_list, words4_set):
     def sort_key(w):
         mission_count = sum(w.count(gh) for gh in GA_HA_CHARS)
-        next_count = count_next_words_words4(w, start_counts)
+        next_count = count_next_words_words4(w, words4_set)
         return (-mission_count, next_count)
         
     return sorted(word_list, key=sort_key)
@@ -169,7 +168,7 @@ async def send_next_quiz(channel, quiz_state):
 
 async def send_next_quiz4(channel, quiz_state):
     q = quiz_state['questions'][quiz_state['current_index']]
-    cond_str = ", ".join([f"'{char}' {cnt}미" for char, cnt in q['counts'].items()])
+    cond_str = ", ".join([f"'{char}' {cnt}개" for char, cnt in q['counts'].items()])
     inc_text = cond_str if cond_str else "포함 조건 없음"
     await channel.send(
         f"❓ **4퀴즈 [{quiz_state['current_index'] + 1}/{quiz_state['total']}]**\n"
@@ -419,6 +418,7 @@ async def on_message(message):
             return
 
         word = content
+        words3_set = get_word_set("words3.txt")
         if word not in words3_set:
             if len(word.split()) == 1:
                 await message.channel.send(f"❌ **[{word}]** 은(는) 단어장에 존재하지 않는 단어입니다.")
@@ -453,6 +453,7 @@ async def on_message(message):
             await message.channel.send("이미 게임이 진행 중입니다.")
             return
 
+        words_set = get_word_set("words.txt")
         if content == "3테스트":
             if not words_set:
                 await message.channel.send("words.txt 단어장이 비어있습니다.")
@@ -493,6 +494,8 @@ async def on_message(message):
         if lobby["host"] != user_id:
             await message.channel.send("방장만 시작할 수 있습니다.")
             return
+
+        words_set = get_word_set("words.txt")
         if not words_set:
             await message.channel.send("words.txt 단어장이 비어있습니다.")
             return
@@ -557,6 +560,7 @@ async def on_message(message):
             return
 
         word = content
+        words_set = get_word_set("words.txt")
         if word not in words_set:
             if len(word.split()) == 1:
                 await message.channel.send(f"❌ **[{word}]** 은(는) 단어장에 존재하지 않는 단어입니다.")
@@ -614,12 +618,8 @@ async def on_message(message):
         if count <= 0: count = 1
         if count > 50: count = 50
 
-        ga_ha_chars = GA_HA_CHARS
-        
-        valid_words = []
-        for w in words2_set:
-            if any(gh in w for gh in ga_ha_chars):
-                valid_words.append(w)
+        words2_set = get_word_set("words2.txt")
+        valid_words = [w for w in words2_set if any(gh in w for gh in GA_HA_CHARS)]
 
         if not valid_words:
             await message.channel.send("퀴즈 조건에 맞는 단어가 words2.txt에 없습니다.")
@@ -629,16 +629,13 @@ async def on_message(message):
         for _ in range(count):
             target = random.choice(valid_words)
             first_char = target[0]
-            includes = [char for char in target[1:] if char in ga_ha_chars]
+            includes = [char for char in target[1:] if char in GA_HA_CHARS]
             
             if not includes and len(target) > 1:
                 includes = [target[1]]
 
             inc_set = set(includes)
-            all_answers = []
-            for w in words2_set:
-                if w.startswith(first_char) and inc_set.issubset(set(w[1:])):
-                    all_answers.append(w)
+            all_answers = [w for w in words2_set if w.startswith(first_char) and inc_set.issubset(set(w[1:]))]
 
             questions.append({
                 "answers": all_answers,
@@ -693,11 +690,8 @@ async def on_message(message):
         start_char = parts[1]
         include_char = parts[2] if len(parts) > 2 else None
 
-        results = []
-        for word in words2_set:
-            if word.startswith(start_char):
-                if include_char is None or include_char in word:
-                    results.append(word)
+        words2_set = get_word_set("words2.txt")
+        results = [w for w in words2_set if w.startswith(start_char) and (include_char is None or include_char in w)]
 
         if not results:
             await message.channel.send("🔍 검색 결과가 없습니다.")
@@ -707,7 +701,6 @@ async def on_message(message):
         await message.channel.send(f"🔍 **검색 결과 ({len(results)}개):**\n{display_list}")
         return
 
-    # --- 4퀴즈 및 4검색 기능 ---
     if content.startswith("4퀴즈"):
         if channel_id in quiz_games or channel_id in quiz4_games:
             await message.channel.send("이미 퀴즈가 진행 중입니다.")
@@ -720,6 +713,7 @@ async def on_message(message):
         if count <= 0: count = 1
         if count > 50: count = 50
 
+        words4_set = get_word_set("words4.txt")
         valid_words = [w for w in words4_set if len(w) >= 2]
         if not valid_words:
             await message.channel.send("words4.txt 단어장이 비어있거나 조건에 맞는 단어가 없습니다.")
@@ -739,15 +733,10 @@ async def on_message(message):
             for w in words4_set:
                 if w.startswith(first_char):
                     w_tail = w[1:]
-                    match = True
-                    for char, req_cnt in mission_counts.items():
-                        if w_tail.count(char) != req_cnt:
-                            match = False
-                            break
-                    if match:
+                    if all(w_tail.count(char) == req_cnt for char, req_cnt in mission_counts.items()):
                         all_answers.append(w)
 
-            all_answers = sort_words4_list(all_answers)
+            all_answers = sort_words4_list(all_answers, words4_set)
 
             questions.append({
                 "answers": all_answers,
@@ -802,17 +791,14 @@ async def on_message(message):
         start_char = parts[1]
         include_char = parts[2] if len(parts) > 2 else None
 
-        results = []
-        for word in words4_set:
-            if word.startswith(start_char):
-                if include_char is None or include_char in word:
-                    results.append(word)
+        words4_set = get_word_set("words4.txt")
+        results = [w for w in words4_set if w.startswith(start_char) and (include_char is None or include_char in w)]
 
         if not results:
             await message.channel.send("🔍 검색 결과가 없습니다.")
             return
 
-        sorted_results = sort_words4_list(results)
+        sorted_results = sort_words4_list(results, words4_set)
         display_list = ", ".join(sorted_results)
         await message.channel.send(f"🔍 **검색 결과 ({len(sorted_results)}개):**\n{display_list}")
         return
